@@ -25,7 +25,7 @@ export function Cabecalho() {
         ) : null}
         <span className="text-lg font-bold">{identidade.nome}</span>
       </div>
-      <nav className="mx-auto flex max-w-3xl gap-1 overflow-x-auto px-2 pb-2">
+      <nav className="mx-auto flex max-w-3xl flex-wrap gap-1 px-2 pb-2">
         {menu.map((item) => {
           const ativo = caminho === item.href;
           return (

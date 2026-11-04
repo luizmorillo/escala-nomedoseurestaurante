@@ -2,7 +2,16 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { supabase, variaveisConfiguradas } from "@/lib/supabase";
-import type { Escala, Funcionario, Turno } from "@/lib/tipos";
+import type { Configuracao, Escala, Funcionario, Regra, Turno } from "@/lib/tipos";
+import {
+  NOME_TIPO,
+  chaveCelula,
+  lerConfiguracoes,
+  nomeCurto,
+  verificarEscala,
+  type Alerta,
+  type ConfigRegras,
+} from "@/lib/regras";
 import {
   DIAS_SEMANA,
   diaMes,
@@ -15,12 +24,6 @@ import {
   somarDias,
 } from "@/lib/datas";
 
-/** "Ana Souza" -> "Ana S." para caber na grade. */
-function nomeCurto(nome: string): string {
-  const partes = nome.trim().split(/\s+/);
-  return partes.length > 1 ? `${partes[0]} ${partes[partes.length - 1][0]}.` : partes[0];
-}
-
 type CelulaAberta = { data: string; turno: Turno };
 
 export default function EscalaDaSemana() {
@@ -32,6 +35,8 @@ export default function EscalaDaSemana() {
   const [erro, setErro] = useState<string | null>(null);
   const [celula, setCelula] = useState<CelulaAberta | null>(null);
   const [salvandoId, setSalvandoId] = useState<string | null>(null);
+  const [config, setConfig] = useState<ConfigRegras | null>(null);
+  const [verAlertas, setVerAlertas] = useState(false);
 
   const semVariaveis = !variaveisConfiguradas();
   const dias = useMemo(() => diasDaSemana(segunda), [segunda]);
@@ -41,9 +46,11 @@ export default function EscalaDaSemana() {
   useEffect(() => {
     async function carregarBase() {
       const db = supabase();
-      const [t, f] = await Promise.all([
+      const [t, f, r, c] = await Promise.all([
         db.from("turnos").select("id, nome, hora_inicio, hora_fim, ordem").order("ordem"),
         db.from("funcionarios").select("id, nome, funcao, telefone, cpf, ativo").order("nome"),
+        db.from("regras").select("id, dia_semana, turno_id, funcao, minimo"),
+        db.from("configuracoes").select("chave, valor"),
       ]);
       if (t.error || f.error) {
         setErro(`Não foi possível carregar turnos e equipe. Detalhe: ${(t.error ?? f.error)?.message}`);
@@ -51,6 +58,14 @@ export default function EscalaDaSemana() {
       }
       setTurnos(t.data ?? []);
       setFuncionarios(f.data ?? []);
+      if (r.error || c.error) {
+        setErro(`Não foi possível carregar as regras da casa. Detalhe: ${(r.error ?? c.error)?.message}`);
+        return;
+      }
+      setConfig({
+        minimos: (r.data ?? []) as Regra[],
+        ...lerConfiguracoes((c.data ?? []) as Configuracao[]),
+      });
     }
     if (!semVariaveis) carregarBase();
   }, [semVariaveis]);
@@ -64,7 +79,8 @@ export default function EscalaDaSemana() {
       const { data, error } = await supabase()
         .from("escalas")
         .select("id, data, turno_id, funcionario_id")
-        .gte("data", segunda)
+        // Inclui o domingo anterior, para a regra "fecha e abre" na segunda.
+        .gte("data", somarDias(segunda, -1))
         .lte("data", somarDias(segunda, 6));
       if (ignorar) return;
       if (error) setErro(`Não foi possível carregar a escala. Detalhe: ${error.message}`);
@@ -92,6 +108,23 @@ export default function EscalaDaSemana() {
       .filter((f): f is Funcionario => Boolean(f))
       .sort((a, b) => a.nome.localeCompare(b.nome, "pt-BR"));
   }
+
+  const alertas = useMemo<Alerta[]>(
+    () => (config ? verificarEscala({ dias, turnos, funcionarios, escalas, config }) : []),
+    [config, dias, turnos, funcionarios, escalas],
+  );
+
+  // Alertas de cada célula, para pintar a grade.
+  const alertasPorCelula = useMemo(() => {
+    const mapa = new Map<string, Alerta[]>();
+    for (const a of alertas) {
+      for (const c of a.celulas) {
+        if (!mapa.has(c)) mapa.set(c, []);
+        mapa.get(c)!.push(a);
+      }
+    }
+    return mapa;
+  }, [alertas]);
 
   async function alternar(funcionario: Funcionario) {
     if (!celula) return;
@@ -168,6 +201,43 @@ export default function EscalaDaSemana() {
       )}
       {erro && <p className="cartao border-red-300 text-red-700">{erro}</p>}
 
+      {config && !carregando && (
+        <div
+          className={`cartao ${alertas.length > 0 ? "border-red-300 bg-red-50" : "border-green-300 bg-green-50"}`}
+        >
+          {alertas.length === 0 ? (
+            <p className="text-base font-semibold text-green-800">✓ Nenhum alerta nesta semana</p>
+          ) : (
+            <>
+              <button
+                className="flex min-h-[44px] w-full items-center justify-between gap-3 text-left"
+                onClick={() => setVerAlertas(!verAlertas)}
+                aria-expanded={verAlertas}
+              >
+                <span className="text-base font-semibold text-red-800">
+                  ⚠ {alertas.length} {alertas.length === 1 ? "alerta" : "alertas"} nesta semana
+                </span>
+                <span className="text-sm font-semibold text-red-800 underline">
+                  {verAlertas ? "Esconder" : "Ver lista"}
+                </span>
+              </button>
+              {verAlertas && (
+                <ul className="mt-2 space-y-2">
+                  {alertas.map((a, i) => (
+                    <li key={i} className="text-sm text-red-900">
+                      <span className="mr-2 rounded bg-red-200 px-1.5 py-0.5 text-xs font-semibold">
+                        {NOME_TIPO[a.tipo]}
+                      </span>
+                      {a.mensagem}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
       <p className="text-sm text-neutral-600">
         Toque em um quadro para escolher quem trabalha. Arraste a grade para o lado para ver
         todos os dias.
@@ -203,12 +273,20 @@ export default function EscalaDaSemana() {
                 </th>
                 {dias.map((d) => {
                   const pessoas = escaladosNa(d, turno.id);
+                  const avisos = alertasPorCelula.get(chaveCelula(d, turno.id)) ?? [];
+                  const comAlerta = avisos.length > 0;
                   return (
                     <td key={d} className={`border-b border-neutral-200 p-1 align-top ${d === hoje ? "bg-neutral-50" : ""}`}>
                       <button
-                        className="flex min-h-[96px] w-full flex-col items-stretch gap-1 rounded-lg p-1 text-left active:bg-neutral-100"
+                        className={`flex min-h-[96px] w-full flex-col items-stretch gap-1 rounded-lg p-1 text-left ${
+                          comAlerta
+                            ? "border-2 border-red-500 bg-red-50 active:bg-red-100"
+                            : "border-2 border-transparent active:bg-neutral-100"
+                        }`}
                         onClick={() => setCelula({ data: d, turno })}
-                        aria-label={`${turno.nome} de ${rotuloDia(d)}: ${pessoas.length} pessoas. Tocar para escolher.`}
+                        aria-label={`${turno.nome} de ${rotuloDia(d)}: ${pessoas.length} pessoas${
+                          comAlerta ? `, ${avisos.length} alerta(s)` : ""
+                        }. Tocar para escolher.`}
                       >
                         {pessoas.length === 0 ? (
                           <span className="m-auto text-2xl text-neutral-300">+</span>
@@ -223,6 +301,11 @@ export default function EscalaDaSemana() {
                             </span>
                           ))
                         )}
+                        {avisos.map((a, i) => (
+                          <span key={i} className="text-[11px] font-semibold leading-tight text-red-700">
+                            ⚠ {a.curta}
+                          </span>
+                        ))}
                       </button>
                     </td>
                   );
@@ -249,6 +332,15 @@ export default function EscalaDaSemana() {
                 {celula.turno.nome} · {DIAS_SEMANA[paraData(celula.data).getDay()]} {diaMes(celula.data)}
               </p>
               <p className="text-sm text-neutral-600">Marque quem trabalha. Salva na hora.</p>
+              {(alertasPorCelula.get(chaveCelula(celula.data, celula.turno.id)) ?? []).length > 0 && (
+                <ul className="mt-3 space-y-1 rounded-xl border border-red-300 bg-red-50 p-3">
+                  {alertasPorCelula.get(chaveCelula(celula.data, celula.turno.id))!.map((a, i) => (
+                    <li key={i} className="text-sm font-medium text-red-800">
+                      ⚠ {a.mensagem}
+                    </li>
+                  ))}
+                </ul>
+              )}
             </div>
             <div className="flex-1 space-y-4 overflow-y-auto p-4">
               {grupos.length === 0 && (
