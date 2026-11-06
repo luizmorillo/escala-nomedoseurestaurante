@@ -1,3 +1,5 @@
+import { funcoes } from "@/config/restaurante";
+
 // Tipos que espelham as tabelas do Supabase (veja supabase/schema.sql).
 
 export type Funcionario = {
@@ -37,11 +39,5 @@ export type Configuracao = {
   valor: string;
 };
 
-export const FUNCOES_PADRAO = [
-  "Salão",
-  "Cozinha",
-  "Caixa",
-  "Bar",
-  "Entregador",
-  "Gerência",
-];
+// Funções da casa: vêm da ficha em src/config/restaurante.ts.
+export const FUNCOES_PADRAO = funcoes;

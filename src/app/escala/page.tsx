@@ -2,12 +2,13 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { supabase, variaveisConfiguradas } from "@/lib/supabase";
-import type { Configuracao, Escala, Funcionario, Regra, Turno } from "@/lib/tipos";
+import type { Configuracao, Escala, Funcionario, Turno } from "@/lib/tipos";
 import {
   NOME_TIPO,
   chaveCelula,
+  domingosDosMeses,
+  horarioDe,
   lerConfiguracoes,
-  nomeCurto,
   verificarEscala,
   type Alerta,
   type ConfigRegras,
@@ -17,7 +18,6 @@ import {
   diaMes,
   diasDaSemana,
   hojeISO,
-  horaCurta,
   inicioDaSemana,
   paraData,
   rotuloDia,
@@ -46,10 +46,9 @@ export default function EscalaDaSemana() {
   useEffect(() => {
     async function carregarBase() {
       const db = supabase();
-      const [t, f, r, c] = await Promise.all([
+      const [t, f, c] = await Promise.all([
         db.from("turnos").select("id, nome, hora_inicio, hora_fim, ordem").order("ordem"),
         db.from("funcionarios").select("id, nome, funcao, telefone, cpf, ativo").order("nome"),
-        db.from("regras").select("id, dia_semana, turno_id, funcao, minimo"),
         db.from("configuracoes").select("chave, valor"),
       ]);
       if (t.error || f.error) {
@@ -58,14 +57,11 @@ export default function EscalaDaSemana() {
       }
       setTurnos(t.data ?? []);
       setFuncionarios(f.data ?? []);
-      if (r.error || c.error) {
-        setErro(`Não foi possível carregar as regras da casa. Detalhe: ${(r.error ?? c.error)?.message}`);
+      if (c.error) {
+        setErro(`Não foi possível carregar as regras da casa. Detalhe: ${c.error.message}`);
         return;
       }
-      setConfig({
-        minimos: (r.data ?? []) as Regra[],
-        ...lerConfiguracoes((c.data ?? []) as Configuracao[]),
-      });
+      setConfig(lerConfiguracoes((c.data ?? []) as Configuracao[]));
     }
     if (!semVariaveis) carregarBase();
   }, [semVariaveis]);
@@ -76,15 +72,22 @@ export default function EscalaDaSemana() {
     // Se a semana mudar antes da resposta chegar, a resposta antiga é ignorada.
     let ignorar = false;
     async function buscar() {
-      const { data, error } = await supabase()
-        .from("escalas")
-        .select("id, data, turno_id, funcionario_id")
+      const db = supabase();
+      const campos = "id, data, turno_id, funcionario_id";
+      const [semana, domingos] = await Promise.all([
         // Inclui o domingo anterior, para a regra "fecha e abre" na segunda.
-        .gte("data", somarDias(segunda, -1))
-        .lte("data", somarDias(segunda, 6));
+        db.from("escalas").select(campos).gte("data", somarDias(segunda, -1)).lte("data", somarDias(segunda, 6)),
+        // Todos os domingos do mês, para a regra de domingo de folga.
+        db.from("escalas").select(campos).in("data", domingosDosMeses(diasDaSemana(segunda))),
+      ]);
       if (ignorar) return;
-      if (error) setErro(`Não foi possível carregar a escala. Detalhe: ${error.message}`);
-      else setEscalas(data ?? []);
+      const falha = semana.error ?? domingos.error;
+      if (falha) setErro(`Não foi possível carregar a escala. Detalhe: ${falha.message}`);
+      else {
+        const porId = new Map<string, Escala>();
+        for (const e of [...(semana.data ?? []), ...(domingos.data ?? [])]) porId.set(e.id, e);
+        setEscalas([...porId.values()]);
+      }
       setCarregando(false);
     }
     buscar();
@@ -239,7 +242,7 @@ export default function EscalaDaSemana() {
       )}
 
       <p className="text-sm text-neutral-600">
-        Toque em um quadro para escolher quem trabalha. Arraste a grade para o lado para ver
+        Toque em um quadro para ver e escolher quem trabalha. Arraste a grade para o lado para ver
         todos os dias.
       </p>
 
@@ -267,9 +270,6 @@ export default function EscalaDaSemana() {
               <tr key={turno.id}>
                 <th className="sticky left-0 z-[1] border-r border-b border-neutral-200 bg-white p-2 text-left align-top">
                   <span className="block font-semibold">{turno.nome}</span>
-                  <span className="block text-xs font-normal text-neutral-500">
-                    {horaCurta(turno.hora_inicio)}–{horaCurta(turno.hora_fim)}
-                  </span>
                 </th>
                 {dias.map((d) => {
                   const pessoas = escaladosNa(d, turno.id);
@@ -291,18 +291,15 @@ export default function EscalaDaSemana() {
                         {pessoas.length === 0 ? (
                           <span className="m-auto text-2xl text-neutral-300">+</span>
                         ) : (
-                          pessoas.map((p) => (
-                            <span
-                              key={p.id}
-                              className="truncate rounded-md px-2 py-1 text-xs font-medium text-white"
-                              style={{ background: "var(--cor-principal)" }}
-                            >
-                              {nomeCurto(p.nome)}
-                            </span>
-                          ))
+                          <span
+                            className="rounded-md px-2 py-1 text-center text-sm font-semibold text-white"
+                            style={{ background: "var(--cor-principal)" }}
+                          >
+                            {pessoas.length} {pessoas.length === 1 ? "pessoa" : "pessoas"}
+                          </span>
                         )}
                         {avisos.map((a, i) => (
-                          <span key={i} className="text-[11px] font-semibold leading-tight text-red-700">
+                          <span key={i} className="text-[11px] font-semibold leading-tight text-red-700 [overflow-wrap:anywhere]">
                             ⚠ {a.curta}
                           </span>
                         ))}
@@ -372,6 +369,9 @@ export default function EscalaDaSemana() {
                           <span className="flex-1 text-base">
                             {p.nome}
                             {!p.ativo && <span className="ml-2 text-sm text-neutral-500">(desativado)</span>}
+                            <span className="block text-sm text-neutral-500">
+                              {horarioDe(p.funcao, celula.turno.nome)?.texto ?? "sem horário neste turno"}
+                            </span>
                           </span>
                           {salvandoId === p.id && <span className="text-sm text-neutral-500">salvando...</span>}
                         </label>
